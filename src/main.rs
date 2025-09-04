@@ -1,5 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::{
+    env,
+    fs,
+    io::Write,
+    path::PathBuf,
+    str,
     sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -232,6 +237,8 @@ impl State {
 }
 
 fn main() -> anyhow::Result<()> {
+    ensure_hook_installed()?; // install hook on startup
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
@@ -282,4 +289,100 @@ fn idle_activity<'a>() -> Activity<'a> {
     Activity::new()
         .state("Mission planning")
         .timestamps(Timestamps::new().start(*T_START))
+}
+
+// === DCS hook installer ===
+
+const HOOK_FILE: &str = r#"
+local lfs         = require("lfs")
+
+package.path      = package.path .. ";" .. lfs.currentdir() .. "/LuaSocket/?.lua"
+package.cpath     = package.cpath .. ";" .. lfs.currentdir() .. "/LuaSocket/?.dll"
+local socket      = require("socket")
+
+local conn        = nil
+
+local RETRY_TIME  = 15
+local UPDATE_TIME = 15
+
+local function connect()
+    local sock = socket.udp()
+    sock:setpeername("localhost", 14242)
+    return sock
+end
+
+local function sendTelemetry(t)
+    if not conn then
+        conn = connect()
+        if not conn then
+            return t + RETRY_TIME
+        end
+    end
+
+    local self = Export.LoGetSelfData()
+    if not self then return t + RETRY_TIME end
+
+    local name = Export.LoGetPilotName()
+    local vehicle = self.Name
+    local ias = Export.LoGetIndicatedAirSpeed()
+    local alt_bar = Export.LoGetAltitudeAboveSeaLevel()
+
+    local sent = conn:send(string.format(
+        "telem %s,%s,%f,%f,%d",
+        name, vehicle, ias, alt_bar, t
+    ))
+    if not sent then conn = nil end
+
+    return t + UPDATE_TIME
+end
+
+local function loadDCSRichPresence()
+    local nextT = 0
+    local handler = {
+        onSimulationStart = function()
+            net.log("[DCSRPC] simulation start")
+            nextT = sendTelemetry(0)
+        end,
+        onSimulationStop = function()
+            net.log("[DCSRPC] simulation stop")
+            nextT = 0
+            if conn then
+                conn:send("bye")
+            end
+        end,
+        onSimulationFrame = function()
+            local t = DCS.getModelTime()
+            if t < nextT then return end
+            net.log("[DCSRPC] sending telemetry")
+            nextT = sendTelemetry(t)
+            net.log("[DCSRPC] next send at t=" .. tostring(nextT))
+        end
+    }
+    DCS.setUserCallbacks(handler)
+end
+
+local status, err = pcall(loadDCSRichPresence)
+if not status then
+    net.log("[DCS Rich Presence] load error: " .. tostring(err))
+else
+    net.log("[DCS Rich Presence] load success")
+end
+"#;
+
+fn ensure_hook_installed() -> anyhow::Result<()> {
+    let user_profile = env::var("USERPROFILE")?;
+    let mut hook_path = PathBuf::from(user_profile);
+    hook_path.push("Saved Games/DCS/Scripts/Hooks/dcs-rich-presence-hook.lua");
+
+    if !hook_path.exists() {
+        if let Some(parent) = hook_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut f = fs::File::create(&hook_path)?;
+        f.write_all(HOOK_FILE.as_bytes())?;
+        println!("Installed DCS hook at {}", hook_path.display());
+    } else {
+        println!("DCS hook already exists at {}", hook_path.display());
+    }
+    Ok(())
 }
