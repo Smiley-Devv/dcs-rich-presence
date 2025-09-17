@@ -5,8 +5,7 @@
 
 ## usage
 
-1. put [`dcs-rich-presence-hook.lua`](./dcs-rich-presence-hook.lua) into your DCS user data `Scripts/Hooks/` directory (on windows defaults to `%USERPROFILE%/Saved Games/DCS/Scripts/Hooks`)
-2. grab the [latest release](https://github.com/backwardspy/dcs-rich-presence/releases/latest) and run it.
+1. It will Automatically Put  the lua inside  your  Dcs  saved games folder :)
 
 ## how it works
 
